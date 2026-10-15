@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Checkout Funnel Diagnostic</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--card:#f4f5f7;--a:#2563eb;--b:#e11d48;--bd:#d8dbe0;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121316;--fg:#ececec;--mut:#9aa0a6;--card:#1c1e22;--a:#6ea0ff;--b:#ff7a93;--bd:#33363c}}
+:root[data-theme="dark"]{--bg:#121316;--fg:#ececec;--mut:#9aa0a6;--card:#1c1e22;--a:#6ea0ff;--b:#ff7a93;--bd:#33363c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif;padding:16px;max-width:920px;margin-inline:auto}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:0 0 8px}.mut{color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;margin:12px 0}
+textarea{width:100%;height:130px;font:13px monospace;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:8px}
+button{background:var(--a);color:#fff;border:0;border-radius:6px;padding:8px 14px;font-size:14px;cursor:pointer;margin-right:6px}
+button.alt{background:transparent;color:var(--fg);border:1px solid var(--bd)}
+.err{color:var(--b);font-weight:600}.row{margin:10px 0}.lbl{display:flex;justify-content:space-between;font-size:13px}
+.bar{height:14px;border-radius:4px;margin-top:3px}.p{background:var(--mut);opacity:.45}.l{background:var(--a)}.worst .l{background:var(--b)}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--bd)}
+.scroll{overflow-x:auto}.tag{font-size:12px;color:var(--b)}
+</style></head><body>
+<h1>Checkout Funnel Diagnostic</h1>
+<div class="mut">Paste stage counts as <code>stage,previous_month,last_month</code> (one per line), then Analyze.</div>
+<div class="card">
+<textarea id="in" aria-label="funnel data"></textarea>
+<div style="margin-top:8px"><button id="go">Analyze</button><button class="alt" id="sample">Load sample data</button><button class="alt" id="clear">Clear</button></div>
+<div id="msg" class="row"></div>
+</div>
+<div id="out"></div>
+<script>
+const SAMPLE=`stage,previous_month,last_month
+Checkout started,10000,10000
+Address added,8600,8500
+Payment page,7900,7700
+Payment attempted,7100,6400
+Order placed,5400,5200`;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function parse(text){
+  const errs=[],rows=[];
+  const lines=(text||'').split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  if(!lines.length)return{errs:['Input is empty. Paste data or click "Load sample data".'],rows};
+  lines.forEach((l,i)=>{
+    const p=l.split(',').map(x=>x.trim());
+    if(i===0&&p.length>=3&&isNaN(Number(p[1])))return; // header
+    if(p.length!==3){errs.push('Line '+(i+1)+': expected 3 comma-separated values.');return}
+    const a=Number(p[1]),b=Number(p[2]);
+    if(!p[0]||!Number.isFinite(a)||!Number.isFinite(b)||a<0||b<0){errs.push('Line '+(i+1)+': counts must be non-negative numbers.');return}
+    rows.push({name:p[0],prev:a,last:b});
+  });
+  if(!errs.length&&rows.length<2)errs.push('Need at least 2 stages to build a funnel.');
+  if(!errs.length&&(rows[0].prev===0||rows[0].last===0))errs.push('First stage cannot be zero.');
+  return{errs,rows};
+}
+const rate=(a,b)=>b===0?0:a/b*100;
+const HYP=[
+ {t:'Payment failures (gateway / UPI / bank timeouts)',k:/pay/i,
+  c:'Drop concentrated at payment attempt; failure-code spike by gateway or UPI app; worse on Android; error rate rises on specific days.'},
+ {t:'Price shock at checkout (delivery fee, taxes, coupon change)',k:/addr|cart|fee|coupon|checkout/i,
+  c:'Drop right after the total is first shown; coupon-apply failures up; average order value or fee shown changed; effect larger for new users.'},
+ {t:'App release regression (new version bug or slowdown)',k:/./,
+  c:'Drop starts on the release date and is limited to the new app version; crash and latency metrics worse on that version; older versions flat.'}];
+function analyze(){
+  const msg=$('msg'),out=$('out');msg.textContent='';out.innerHTML='';
+  try{
+    const {errs,rows}=parse($('in').value);
+    if(errs.length){msg.innerHTML='<span class="err">'+errs.map(esc).join('<br>')+'</span>';return}
+    const max=Math.max(...rows.flatMap(r=>[r.prev,r.last]))||1;
+    const steps=rows.map((r,i)=>{
+      const pp=i?rate(r.prev,rows[i-1].prev):100,lp=i?rate(r.last,rows[i-1].last):100;
+      return{...r,pp,lp,d:lp-pp};
+    });
+    let w=1;steps.forEach((s,i)=>{if(i&&s.d<steps[w].d)w=i});
+    const cp=rate(rows.at(-1).prev,rows[0].prev),cl=rate(rows.at(-1).last,rows[0].last);
+    let h='<div class="card"><h2>Overall conversion ('+esc(rows[0].name)+' → '+esc(rows.at(-1).name)+')</h2>'
+      +'<div>Previous: <b>'+cp.toFixed(1)+'%</b> &nbsp; Last month: <b>'+cl.toFixed(1)+'%</b> &nbsp; Change: <b class="'+(cl<cp?'err':'')+'">'+(cl-cp).toFixed(1)+' pts</b></div></div>';
+    h+='<div class="card"><h2>Funnel by stage</h2><div class="mut" style="font-size:12px">Grey = previous month, colour = last month. Red stage = largest step-conversion drop.</div>';
+    steps.forEach((s,i)=>{
+      h+='<div class="row '+(i===w&&s.d<0?'worst':'')+'"><div class="lbl"><span>'+esc(s.name)+'</span><span>'+s.last.toLocaleString()+(i?' · step '+s.lp.toFixed(1)+'% ('+(s.d>=0?'+':'')+s.d.toFixed(1)+' pts)':'')+'</span></div>'
+        +'<div class="bar p" style="width:'+(s.prev/max*100)+'%"></div><div class="bar l" style="width:'+(s.last/max*100)+'%"></div></div>';
+    });
+    h+='</div><div class="card scroll"><h2>Step conversion</h2><table><tr><th>Stage</th><th>Prev</th><th>Last</th><th>Δ pts</th></tr>';
+    steps.forEach((s,i)=>{h+='<tr><td>'+esc(s.name)+'</td><td>'+(i?s.pp.toFixed(1)+'%':'–')+'</td><td>'+(i?s.lp.toFixed(1)+'%':'–')+'</td><td>'+(i?(s.d>=0?'+':'')+s.d.toFixed(1):'–')+'</td></tr>'});
+    h+='</table></div>';
+    const ws=steps[w],ranked=HYP.map((x,i)=>({...x,s:(i<2&&x.k.test(ws.name)?2:0)+(i===2?0.5:0)})).sort((a,b)=>b.s-a.s);
+    h+='<div class="card"><h2>Top 3 hypotheses</h2><div class="mut" style="font-size:12px">Biggest weakening: '+esc(steps[w-1]?.name||'')+' → '+esc(ws.name)+' ('+ws.d.toFixed(1)+' pts)</div>';
+    ranked.forEach((x,i)=>{h+='<div class="row"><b>'+(i+1)+'. '+esc(x.t)+'</b>'+(x.s>=2?' <span class="tag">matches biggest drop</span>':'')+'<div class="mut">Confirmed if: '+esc(x.c)+'</div></div>'});
+    h+='</div>';
+    out.innerHTML=h;
+  }catch(e){msg.innerHTML='<span class="err">Something went wrong reading that input. Check the format and try again.</span>'}
+}
+$('go').onclick=analyze;
+$('sample').onclick=()=>{$('in').value=SAMPLE;analyze()};
+$('clear').onclick=()=>{$('in').value='';$('out').innerHTML='';$('msg').textContent=''};
+$('in').value=SAMPLE;analyze();
+</script></body></html>
